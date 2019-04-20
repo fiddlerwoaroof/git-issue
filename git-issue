@@ -1,0 +1,172 @@
+#!/usr/bin/env zsh
+autoload -U colors
+colors
+
+set -eu -o pipefail
+
+function define() {
+  IFS='\n' read -r -d '' ${1} || true;
+}
+
+local commit_template_fn="$(mktemp)"
+TRAPEXIT() {
+  rm "$commit_template_fn"
+}
+
+function git-issue-start() {
+  >"$commit_template_fn" <<"EOF"
+issue: 
+
+# issue body
+EOF
+
+  git stash
+  TRAPEXIT() {
+    git stash pop
+  }
+  git commit --allow-empty -t "$commit_template_fn"
+}
+
+git-issue-sum() {
+  git log --format=format:"%h: %s" --grep issue:
+}
+alias git-issue-list=git-issue-sum
+alias git-issue-summary=git-issue-sum
+
+
+function git-issue-summarize() {
+  git show -s --format=format:"%h: %s" "${1?need a ref}" --
+  echo
+}
+
+git-issue-normalize-ref () {
+  git show -s --format=format:"%h" ${1?need a ref} --
+}
+
+git-issue-closed-commits() {
+  git log --format=format:"%h:%s" --grep close | sed -E 's/^.*:close\(([^)]+)\):.*$/\1/' | sort
+}
+git-issue-aborted-commits() {
+  git log --format=format:"%h:%s" --grep abort | sed -E 's/^.*:abort\(([^)]+)\):.*$/\1/' | sort
+}
+git-issue-issue-commits() {
+  git log --format=format:"%h" --grep issue: | sort
+}
+
+git-issue-open() {
+  comm -23 <( ( git-issue-issue-commits ) ) <( ( git-issue-closed-commits ) ) | {
+    while read -r; do
+      git-issue-summarize "$REPLY"
+    done
+  }
+}
+
+git-issue-closed() {
+  git-issue-closed-commits | {
+    while read -r; do
+      git-issue-summarize "$REPLY"
+    done
+  }
+}
+
+git-issue-aborted() {
+  git-issue-aborted-commits | {
+    while read -r; do
+      git-issue-summarize "$REPLY"
+    done
+  }
+}
+
+git-issue-progress() {
+  : ${1?need a ref}
+  issue="$(git-issue-normalize-ref "$1")"
+
+  git-issue-show "$issue"
+  echo
+
+  git log \
+    --format=format:$'%h: %s\n' \
+    --grep "$(git-issue-normalize-ref "${issue}")" |
+    gtac
+}
+
+in-progress() {
+  : ${1?need a ref}
+  issue="$(git-issue-normalize-ref "$1")"
+
+  git log \
+    --format=format:$'%h: %s\n' \
+    --grep "$(git-issue-normalize-ref "${issue}")" |
+    grep -v "close($issue)"
+}
+
+git-issue-ip() {
+  in-progress "$@"
+}
+
+function git-issue-all() {
+  {
+    git-issue-open | {
+      while read -r; do 
+        if in-progress "${REPLY%%:*}" >/dev/null; then
+          printf "${fg[yellow]}PROGRESS${reset_color}\t$REPLY\n";
+        else
+          printf "${fg[green]}OPEN${reset_color}\t$REPLY\n";
+        fi
+      done 
+    } | sort -r
+    git-issue-closed | {
+      while read -r; do
+        printf "${fg[red]}CLOSED${reset_color}\t$REPLY\n";
+      done 
+    }
+    git-issue-aborted | {
+      while read -r; do
+        printf "${fg[red]}ABORTED${reset_color}\t$REPLY\n";
+      done 
+    }
+  } | column -t -s $'\t'
+}
+
+git-issue-show() {
+  git show --format=full "$1" --
+}
+
+git-issue-show-brief() {
+  git show --format=format:"%h: %s" "$1" --
+}
+
+git-issue-close() {
+  issue="$(git-issue-normalize-ref "${1?must provide an issue hash to close}")"
+
+  if ! git-issue-show "$issue" &>/dev/null; then
+    echo "invalid issue '$issue' provided" >&2
+    return
+  fi
+
+  >"$commit_template_fn" <<EOF
+abort($issue): 
+EOF
+
+  git commit --allow-empty -t "$commit_template_fn"
+}
+
+git-issue-abort() {
+  issue="$(git-issue-normalize-ref "${1?must provide an issue hash to close}")"
+
+  if ! git-issue-show "$issue" &>/dev/null; then
+    echo "invalid issue '$issue' provided" >&2
+    return
+  fi
+
+  >"$commit_template_fn" <<EOF
+abort($issue): 
+EOF
+
+  git commit --allow-empty -t "$commit_template_fn"
+}
+
+local subcmd=$1
+shift
+
+"git-issue-$subcmd" "$@"
